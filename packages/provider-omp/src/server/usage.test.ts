@@ -3,7 +3,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { resolveOmpSessionsDir } from "./usage.ts";
+import { ompUsageReader, resolveOmpSessionsDir } from "./usage.ts";
+
+it("prices usage mapped onto an omp model at the model's own rate", () => {
+  expect(ompUsageReader.rateModel?.("anthropic/claude-haiku-5-5")).toBe("claude-haiku-5-5");
+  expect(ompUsageReader.rateModel?.("openrouter/deepseek/deepseek-v4")).toBe(
+    "deepseek/deepseek-v4",
+  );
+});
 
 it.effect("resolves profile roots, explicit session overrides and existing XDG data roots", () =>
   Effect.gen(function* () {
