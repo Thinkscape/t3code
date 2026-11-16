@@ -904,6 +904,9 @@ importers:
       '@t3tools/provider-muse':
         specifier: workspace:*
         version: link:../../packages/provider-muse
+      '@t3tools/provider-omp':
+        specifier: workspace:*
+        version: link:../../packages/provider-omp
       '@t3tools/provider-opencode':
         specifier: workspace:*
         version: link:../../packages/provider-opencode
@@ -1528,6 +1531,9 @@ importers:
       '@t3tools/provider-muse':
         specifier: workspace:*
         version: link:../provider-muse
+      '@t3tools/provider-omp':
+        specifier: workspace:*
+        version: link:../provider-omp
       '@t3tools/provider-opencode':
         specifier: workspace:*
         version: link:../provider-opencode
