@@ -1,6 +1,6 @@
 # omp-native fork
 
-Private fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) that adds a native provider
+Fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) that adds a native provider
 for [omp](https://github.com/can1357/oh-my-pi) (Oh My Pi). It drives `omp --mode rpc-ui` directly
 over omp's RPC protocol. User-facing behavior: [docs/user/providers-omp.md](docs/user/providers-omp.md).
 
