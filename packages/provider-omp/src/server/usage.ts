@@ -131,6 +131,8 @@ export const ompUsageReader: ProviderUsageReader<OmpSettings, Path.Path> = {
   kind: "transcripts",
   provider: "omp",
   format: ompUsageFormat,
+  // Omp model IDs are `<provider>/<rate model>`.
+  rateModel: (model) => model.slice(model.indexOf("/") + 1),
   directories: Effect.fn("ompUsageReader.directories")(function* ({ config, environment }) {
     const path = yield* Path.Path;
     const home = yield* HostProcess.HomeDirectory;

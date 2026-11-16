@@ -503,6 +503,8 @@ interface OmpToolCalls {
   readonly phase: Map<string, OmpToolPhase>;
   /** Latest frame of each unsettled call, replayed to settle it when its transcript ends. */
   readonly open: Map<string, OmpRpcRecord>;
+  /** Output bytes of each running shell call already streamed as deltas. */
+  readonly outputBytes: Map<string, number>;
 }
 
 const makeOmpToolCalls = (): OmpToolCalls => ({
@@ -510,6 +512,7 @@ const makeOmpToolCalls = (): OmpToolCalls => ({
   startedAt: new Map(),
   phase: new Map(),
   open: new Map(),
+  outputBytes: new Map(),
 });
 
 type OmpItemBase = Pick<
@@ -748,7 +751,8 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       }
       const launch = buildOmpRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
-        environment: options.environment,
+        // PortScanner.AGENT_THREAD_ENV, as a literal because this package cannot reach apps/server.
+        environment: { ...options.environment, T3CODE_THREAD_ID: input.threadId },
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
@@ -1589,6 +1593,35 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           ),
       });
 
+      // Omp resends the whole output tail on every update; stored snapshots grow quadratically.
+      const emitCommandOutputDelta = (
+        calls: OmpToolCalls,
+        item: Pick<OmpItemBase, "id" | "threadId">,
+        toolCallId: string,
+        result: unknown,
+      ) =>
+        Effect.suspend(() => {
+          const text = contentText(recordField(result, "content"));
+          const tail = Buffer.from(text, "utf8");
+          const totalBytes =
+            recordNumber(recordField(recordField(result, "details"), "truncation"), "totalBytes") ??
+            tail.length;
+          const previousBytes = calls.outputBytes.get(toolCallId) ?? 0;
+          calls.outputBytes.set(toolCallId, totalBytes);
+          if (totalBytes <= previousBytes) return Effect.void;
+          let start = Math.max(0, tail.length - (totalBytes - previousBytes));
+          while (start < tail.length && (tail[start]! & 0xc0) === 0x80) start++;
+          const chunk = tail.subarray(start).toString("utf8");
+          if (chunk.length === 0) return Effect.void;
+          return emit({
+            type: "command_output.delta",
+            driver: OMP_PROVIDER,
+            threadId: item.threadId,
+            itemId: item.id,
+            chunk,
+          });
+        });
+
       const emitToolItem = Effect.fnUntraced(function* (
         target: OmpToolTarget,
         event: OmpRpcRecord,
@@ -1661,6 +1694,15 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           calls.open.set(toolCallId, event);
         }
         const base = target.itemFields(toolCallId, startedAt, emittedAt, parentToolCallId);
+        // A running shell call's updates stream as live output; only its final state is stored.
+        if (
+          phase === "update" &&
+          status === "running" &&
+          (toolName === "bash" || toolName === "powershell")
+        ) {
+          yield* emitCommandOutputDelta(calls, base, toolCallId, resultRecord);
+          return;
+        }
         yield* target.emitNode(
           toolCallId,
           status,
@@ -2528,6 +2570,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         turn: ActiveOmpTurn,
         nativeItemId: string,
         message: string,
+        level?: "info" | "warning" | "error",
       ) {
         const emittedAt = yield* DateTime.now;
         yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
@@ -2541,6 +2584,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             title: message,
             type: "system_notice",
             message,
+            ...(level === undefined ? {} : { level }),
           },
         });
       });
@@ -2595,10 +2639,12 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
+          const notifyType = recordString(event, "notifyType");
           yield* emitSystemNotice(
             turn,
             `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
             message,
+            notifyType === "warning" || notifyType === "error" ? notifyType : "info",
           );
           return;
         }
@@ -5129,10 +5175,11 @@ function ompQuestion(
   const detail = [recordString(event, "message"), recordString(event, "placeholder")].find(
     (text) => text !== undefined && text.trim().length > 0,
   );
+  const questionTitle = title.trim() ? title : "Question";
   return {
     id: questionId,
-    header: detail === undefined ? "Question" : title,
-    question: detail ?? title,
+    header: detail === undefined ? "Question" : questionTitle,
+    question: detail ?? questionTitle,
     ...(method === "editor" ? { initialAnswer: recordString(event, "prefill") ?? "" } : {}),
     options,
   };

@@ -26,6 +26,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as TestClock from "effect/testing/TestClock";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -87,9 +88,11 @@ const makeFakeOmpWith = Effect.fnUntraced(function* (unanswered: ReadonlyArray<s
   const emit = (record: OmpRpcRecord) =>
     Queue.offer(stdout, new TextEncoder().encode(`${encodeJsonLine(record)}\n`));
   let buffered = "";
-  const spawner = ChildProcessSpawner.make(() =>
-    Effect.succeed(
-      ChildProcessSpawner.makeHandle({
+  let lastEnv: NonNullable<ChildProcess.CommandOptions["env"]> = {};
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.sync(() => {
+      if (ChildProcess.isStandardCommand(command)) lastEnv = command.options.env ?? {};
+      return ChildProcessSpawner.makeHandle({
         pid: ChildProcessSpawner.ProcessId(FAKE_PID),
         exitCode: Effect.never,
         isRunning: Effect.succeed(true),
@@ -134,8 +137,8 @@ const makeFakeOmpWith = Effect.fnUntraced(function* (unanswered: ReadonlyArray<s
         all: Stream.empty,
         getInputFd: () => Sink.drain,
         getOutputFd: () => Stream.empty,
-      }),
-    ),
+      });
+    }),
   );
   const takeRequest = (type: string) =>
     Effect.gen(function* () {
@@ -144,7 +147,7 @@ const makeFakeOmpWith = Effect.fnUntraced(function* (unanswered: ReadonlyArray<s
         if (request["type"] === type) return request;
       }
     });
-  return { spawner, emit, takeRequest, closeStdout: Queue.end(stdout) };
+  return { spawner, emit, takeRequest, closeStdout: Queue.end(stdout), lastEnv: () => lastEnv };
 });
 const makeFakeOmp = makeFakeOmpWith([]);
 type FakeOmp = Effect.Success<typeof makeFakeOmp>;
@@ -295,6 +298,13 @@ describe("OmpAdapterV2", () => {
         assert.equal(setThinking["level"], "high");
         yield* fake.takeRequest("prompt");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("gives omp the thread id agents read as T3CODE_THREAD_ID", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      yield* openRuntime(fake);
+      assert.equal(fake.lastEnv().T3CODE_THREAD_ID, THREAD_ID);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
   it.effect("sends native compaction modes as unchanged prompt commands", () =>
     Effect.gen(function* () {
@@ -513,6 +523,39 @@ describe("OmpAdapterV2", () => {
       const uiResponse = yield* fake.takeRequest("extension_ui_response");
       assert.equal(uiResponse["id"], "ui-trust");
       assert.equal(uiResponse["confirmed"], true);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("asks a blank-titled extension dialog as a plain question", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "ui-blank",
+        method: "select",
+        title: "  ",
+        options: ["Red", "Blue"],
+      });
+      const question = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
+      );
+      if (
+        question.type !== "turn_item.updated" ||
+        question.turnItem.type !== "user_input_request"
+      ) {
+        return assert.fail("expected a question item");
+      }
+      assert.equal(question.turnItem.questions[0]?.header, "Question");
+      assert.equal(question.turnItem.questions[0]?.question, "Question");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -1171,6 +1214,66 @@ describe("OmpAdapterV2 native subagents", () => {
         item.type === "command_execution" ? [item.status] : [],
       );
       assert.deepEqual(commandStatuses, ["running", "running", "completed"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("streams a running bash call's output as deltas and stores only its end", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { takeEvent } = yield* openTurn(fake);
+      const bash = (type: string, extra: Record<string, unknown>) =>
+        fake.emit({
+          type,
+          toolCallId: "toolu_stream",
+          toolName: "bash",
+          args: { command: "echo one; echo two" },
+          ...extra,
+        });
+      const output = (text: string) => ({ content: [{ type: "text", text }] });
+      yield* bash("tool_execution_start", {});
+      yield* bash("tool_execution_update", { partialResult: output("one\n") });
+      yield* bash("tool_execution_update", { partialResult: output("one\ntwo\n") });
+      yield* bash("tool_execution_end", { result: output("one\ntwo\n"), isError: false });
+      yield* settleTurn(fake);
+      const events = yield* collectUntilTerminal(takeEvent);
+      assert.deepEqual(
+        events.flatMap((event) => (event.type === "command_output.delta" ? [event.chunk] : [])),
+        ["one\n", "two\n"],
+      );
+      assert.deepEqual(
+        turnItemsOf(events).flatMap((item) =>
+          item.type === "command_execution" ? [[item.status, item.output ?? null]] : [],
+        ),
+        [
+          ["running", null],
+          ["completed", "one\ntwo\n"],
+        ],
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps an extension notification's level, defaulting to info", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { takeEvent } = yield* openTurn(fake);
+      for (const notifyType of ["info", "warning", "error", undefined, "unknown"] as const) {
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "ui-notify",
+          method: "notify",
+          message: "Command finished",
+          ...(notifyType === undefined ? {} : { notifyType }),
+        });
+        const notice = yield* takeEvent(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+        );
+        assert.isTrue(
+          notice.type === "turn_item.updated" &&
+            notice.turnItem.type === "system_notice" &&
+            notice.turnItem.level ===
+              (notifyType === "warning" || notifyType === "error" ? notifyType : "info"),
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
