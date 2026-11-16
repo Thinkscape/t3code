@@ -26,7 +26,11 @@ import * as Schema from "effect/Schema";
 import * as SqlError from "effect/sql/SqlError";
 
 import { AgentScope } from "@t3tools/shared/AgentScope";
-import { modelSelectionsEqual } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  getModelSelectionStringOptionValue,
+  modelSelectionsEqual,
+} from "@t3tools/shared/model";
 import {
   ProviderTurnAnalytics,
   type ProviderTurnAnalyticsContext,
@@ -625,6 +629,36 @@ export const layer: Layer.Layer<
                 }),
               ];
             }
+            case "model_option.ended": {
+              const { threadId, optionId, value } = input.event;
+              const thread = yield* projections.getThread(threadId).pipe(
+                Effect.catchTags({
+                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                }),
+              );
+              if (
+                thread === null ||
+                getModelSelectionStringOptionValue(thread.modelSelection, optionId) !== value
+              )
+                return [];
+              const occurredAt = yield* DateTime.now;
+              return [
+                yield* makeDomainEvent(input, {
+                  type: "thread.model-selection-updated",
+                  threadId,
+                  payload: {
+                    ...thread,
+                    modelSelection: createModelSelection(
+                      thread.modelSelection.instanceId,
+                      thread.modelSelection.model,
+                      thread.modelSelection.options?.filter((option) => option.id !== optionId),
+                    ),
+                    updatedAt: occurredAt,
+                  },
+                  occurredAt,
+                }),
+              ];
+            }
             case "steer.updated": {
               const item = yield* projections.getTurnItem({
                 threadId: input.event.threadId,
@@ -885,10 +919,13 @@ export const layer: Layer.Layer<
                   });
                 }),
               ),
+              // These write a whole thread row, so no thread command may land in between.
               (effect) =>
                 input.event.type === "app_thread.created"
                   ? threadCommands.withLock(input.event.appThread.id, effect)
-                  : effect,
+                  : input.event.type === "model_option.ended"
+                    ? threadCommands.withLock(input.event.threadId, effect)
+                    : effect,
             ),
         ),
     });

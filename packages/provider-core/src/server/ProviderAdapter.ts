@@ -176,6 +176,19 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     plan: OrchestrationV2PlanArtifact,
   }),
+  /**
+   * The provider left a model option value on its own, e.g. a plan mode it ends once the plan is
+   * approved. The thread's selection drops the option, so its default shows, unless the thread no
+   * longer has that value.
+   */
+  Schema.Struct({
+    type: Schema.Literal("model_option.ended"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    runId: RunId,
+    optionId: Schema.String,
+    value: Schema.String,
+  }),
   Schema.Struct({
     type: Schema.Literal("turn.terminal"),
     driver: ProviderDriverKind,

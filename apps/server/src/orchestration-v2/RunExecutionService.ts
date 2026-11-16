@@ -543,6 +543,7 @@ export function routeProviderEvent(
     case "message.updated":
       return [ownsRun(event.message.runId) || ownsChildThread(event.message.threadId), state];
     case "steer.updated":
+    case "model_option.ended":
       return [ownsRun(event.runId), state];
     case "turn_item.updated": {
       if (
