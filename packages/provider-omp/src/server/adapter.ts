@@ -9,6 +9,15 @@ import {
   type OmpAskPress,
 } from "./questions.ts";
 import {
+  ompFormCard,
+  ompFormQuestion,
+  ompFormSubmission,
+  type OmpFormCard,
+  type OmpFormEntry,
+  type OmpFormProblem,
+  type OmpFormValue,
+} from "./form.ts";
+import {
   isOmpSessionSettled,
   ompAgentEndYielded,
   ompDeliveredAsyncJobs,
@@ -648,7 +657,7 @@ interface OmpTurnTreeRefs {
 
 interface PendingOmpPrompt {
   readonly nativeRequestId: string;
-  readonly method: "select" | "confirm" | "input" | "editor" | "ask";
+  readonly method: "select" | "confirm" | "input" | "editor" | "ask" | "form";
   readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
   readonly questionId: string;
   readonly approvalKey: string;
@@ -663,6 +672,27 @@ interface PendingOmpPrompt {
   readonly approval?: OmpApprovalPrompt;
   /** A choice of omp's `ask` tool, answered by one or more dialog presses. */
   readonly askChoice?: OmpAskChoice;
+  /** omp's `form` dialog (the `ask` tool), asked as one card; see {@link OmpFormPrompt}. */
+  readonly form?: OmpFormPrompt;
+}
+
+/**
+ * One round of an omp `form` dialog. omp answers a form once, so answers the form would reject
+ * are not sent: the fields they answered are asked again in a new card on the same dialog, and
+ * the answers it accepted are kept for the final `data`.
+ */
+interface OmpFormPrompt {
+  readonly event: OmpRpcRecord;
+  readonly card: OmpFormCard;
+  readonly entries: ReadonlyArray<OmpFormEntry>;
+  readonly accepted: ReadonlyMap<string, OmpFormValue | undefined>;
+}
+
+interface OmpFormRetry {
+  readonly card: OmpFormCard;
+  readonly problems: ReadonlyArray<OmpFormProblem>;
+  readonly accepted: ReadonlyMap<string, OmpFormValue | undefined>;
+  readonly expiresAt: number | null;
 }
 
 interface OmpPlanCard {
@@ -2519,6 +2549,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
       const cancelPrompt = Effect.fn("OmpAdapter.cancelPrompt")(function* (
         pending: PendingOmpPrompt,
         resolvedAt: DateTime.Utc,
+        timedOut = false,
       ) {
         if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
         yield* connection
@@ -2526,6 +2557,8 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             type: "extension_ui_response",
             id: pending.nativeRequestId,
             cancelled: true,
+            // A timed-out form submits its defaults (the preselected recommendation) instead.
+            ...(timedOut && pending.method === "form" ? { timedOut: true } : {}),
           })
           .pipe(Effect.ignore);
         pending.runtimeRequest = {
@@ -2621,7 +2654,10 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         );
       });
 
-      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: OmpRpcRecord) {
+      const handleExtensionUiRequest = Effect.fnUntraced(function* (
+        event: OmpRpcRecord,
+        formRetry?: OmpFormRetry,
+      ) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
@@ -2653,12 +2689,47 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           method !== "confirm" &&
           method !== "input" &&
           method !== "editor" &&
-          method !== "ask"
+          method !== "ask" &&
+          method !== "form"
         ) {
           yield* Effect.logDebug("Ignoring omp extension UI update.", { method });
           return;
         }
         if (nativeRequestId === undefined) return;
+        const formCard =
+          method === "form"
+            ? (formRetry?.card ?? ompFormCard(recordString(event, "html") ?? ""))
+            : undefined;
+        if (formCard !== undefined && "unsupported" in formCard) {
+          // omp's ask blocks until a form is answered, so one the card cannot ask is dismissed.
+          yield* Effect.logWarning("Cancelled an omp form the question card cannot ask.", {
+            reason: formCard.unsupported,
+          });
+          yield* connection.send({
+            type: "extension_ui_response",
+            id: nativeRequestId,
+            cancelled: true,
+          });
+          const turn = threadState?.activeTurn ?? null;
+          if (turn !== null) {
+            yield* emitSystemNotice(
+              turn,
+              `form-unsupported:${nativeRequestId}`,
+              `Omp asked with a form T3 cannot show (${formCard.unsupported}), so it was dismissed.`,
+              "warning",
+            );
+          }
+          return;
+        }
+        const formEntries =
+          formCard === undefined
+            ? undefined
+            : (formRetry?.problems.map((problem) => problem.entry) ?? formCard.entries);
+        const formQuestions =
+          formCard === undefined
+            ? undefined
+            : (formRetry?.problems.map((problem) => ompFormQuestion(problem.entry, problem)) ??
+              formCard.entries.map((entry) => ompFormQuestion(entry)));
         const queuedPress = queuedAskPresses.shift();
         if (queuedPress !== undefined) {
           const value = ompAskPressValue(queuedPress, method, event);
@@ -2694,11 +2765,14 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         const turn = state?.activeTurn ?? null;
         const createdAt = yield* DateTime.now;
         const timeout = recordNumber(event, "timeout");
-        // Omp treats zero as no timeout and negative durations as immediate expiry.
+        // Omp treats zero as no timeout and negative durations as immediate expiry. A form asked
+        // again keeps its first deadline.
         const expiresAt =
-          timeout === undefined || timeout === 0
-            ? null
-            : DateTime.toEpochMillis(createdAt) + Math.max(0, timeout);
+          formRetry !== undefined
+            ? formRetry.expiresAt
+            : timeout === undefined || timeout === 0
+              ? null
+              : DateTime.toEpochMillis(createdAt) + Math.max(0, timeout);
         const requestId = yield* idAllocator.allocate.runtimeRequest({
           driver: OMP_PROVIDER,
           ...(turn === null ? {} : { providerTurnId: turn.providerTurn.id }),
@@ -2717,7 +2791,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               )
             : undefined;
         const isApproval = method === "confirm" || approval !== undefined;
-        const rawTitle = recordString(event, "title") ?? method;
+        const rawTitle = formCard?.title ?? recordString(event, "title") ?? method;
         const planMarkdown = method === "select" ? ompPlanReviewMarkdown(rawTitle) : undefined;
         const askChoice =
           method === "select" && approval === undefined && planMarkdown === undefined
@@ -2812,16 +2886,20 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                   type: "user_input_request",
                   requestId,
                   questions:
-                    method === "ask"
-                      ? ompAskQuestions(event)
-                      : [
-                          askChoice === undefined
-                            ? ompQuestion(nativeRequestId, method, title, event)
-                            : ompAskChoiceQuestion(
-                                ompQuestion(nativeRequestId, method, title, event),
-                                askChoice,
-                              ),
-                        ],
+                    formQuestions !== undefined
+                      ? formQuestions
+                      : method === "ask"
+                        ? ompAskQuestions(event)
+                        : method === "form"
+                          ? []
+                          : [
+                              askChoice === undefined
+                                ? ompQuestion(nativeRequestId, method, title, event)
+                                : ompAskChoiceQuestion(
+                                    ompQuestion(nativeRequestId, method, title, event),
+                                    askChoice,
+                                  ),
+                            ],
                 };
         const pending: PendingOmpPrompt = {
           nativeRequestId,
@@ -2837,6 +2915,16 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
           ...(proposedPlan === undefined ? {} : { proposedPlan }),
           ...(approval === undefined ? {} : { approval }),
           ...(askChoice === undefined ? {} : { askChoice }),
+          ...(formCard === undefined || formEntries === undefined
+            ? {}
+            : {
+                form: {
+                  event,
+                  card: formCard,
+                  entries: formEntries,
+                  accepted: formRetry?.accepted ?? new Map(),
+                },
+              }),
         };
         pendingPrompts.set(String(requestId), pending);
         yield* emit({
@@ -3258,7 +3346,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         // Model hooks can show dialogs before turn ownership; keep requests session-scoped and buffer output.
         const interactiveUiRequest =
           event["type"] === "extension_ui_request" &&
-          ["select", "confirm", "input", "editor"].includes(String(event["method"]));
+          ["select", "confirm", "input", "editor", "form"].includes(String(event["method"]));
         if (
           threadState?.activeTurn === null &&
           pendingWake !== null &&
@@ -3754,7 +3842,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             const pending = pendingPrompts.get(requestId);
             if (pending === undefined || pending !== event["pending"]) return;
             pendingPrompts.delete(requestId);
-            yield* cancelPrompt(pending, yield* DateTime.now);
+            yield* cancelPrompt(pending, yield* DateTime.now, true);
             return;
           }
           case "t3.flush_extension_errors": {
@@ -4543,7 +4631,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               DateTime.toEpochMillis(answeredAt) >= pending.expiresAt
             ) {
               pendingPrompts.delete(String(requestInput.requestId));
-              yield* cancelPrompt(pending, answeredAt);
+              yield* cancelPrompt(pending, answeredAt, true);
               return yield* protocolError(
                 `Omp extension request ${requestInput.requestId} has expired`,
               );
@@ -4564,12 +4652,35 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                   : "done" in firstPress
                     ? pending.askChoice?.doneLabel
                     : undefined;
+            const formResult =
+              pending.form === undefined || requestInput.answers === undefined
+                ? undefined
+                : ompFormSubmission(
+                    pending.form.card,
+                    pending.form.entries,
+                    requestInput.answers,
+                    pending.form.accepted,
+                  );
+            // Answers the form would reject are asked again rather than failing omp's ask.
+            const formRetry: OmpFormRetry | undefined =
+              pending.form !== undefined && formResult !== undefined && "problems" in formResult
+                ? {
+                    card: pending.form.card,
+                    problems: formResult.problems,
+                    accepted: formResult.accepted,
+                    expiresAt: pending.expiresAt,
+                  }
+                : undefined;
             const response: OmpRpcRecord =
-              pending.askChoice === undefined
-                ? ompUiResponse(pending, requestInput.decision, requestInput.answers)
-                : firstValue === undefined
-                  ? { cancelled: true }
-                  : { value: firstValue };
+              pending.form !== undefined
+                ? formResult !== undefined && "data" in formResult
+                  ? { data: formResult.data }
+                  : { cancelled: true }
+                : pending.askChoice === undefined
+                  ? ompUiResponse(pending, requestInput.decision, requestInput.answers)
+                  : firstValue === undefined
+                    ? { cancelled: true }
+                    : { value: firstValue };
             queuedAskPresses.length = 0;
             if (firstValue !== undefined) queuedAskPresses.push(...laterPresses);
             const feedback = requestInput.feedback?.trim();
@@ -4577,11 +4688,13 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               // Queued before the denial reaches omp, whose extension then asks for it.
               declinedApprovalFeedback.push({ toolName: pending.approval.toolName, feedback });
             }
-            yield* connection.send({
-              type: "extension_ui_response",
-              id: pending.nativeRequestId,
-              ...response,
-            });
+            if (formRetry === undefined) {
+              yield* connection.send({
+                type: "extension_ui_response",
+                id: pending.nativeRequestId,
+                ...response,
+              });
+            }
             pendingPrompts.delete(String(requestInput.requestId));
             if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
             if (pending.method === "confirm" && requestInput.decision === "acceptForSession") {
@@ -4631,6 +4744,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                 updatedAt: resolvedAt,
               },
             });
+            if (pending.form !== undefined && formRetry !== undefined) {
+              yield* handleExtensionUiRequest(pending.form.event, formRetry);
+            }
           },
           (effect, requestInput) =>
             effect.pipe(

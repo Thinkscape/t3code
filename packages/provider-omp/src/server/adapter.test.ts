@@ -497,6 +497,147 @@ describe("OmpAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  const FORM_HTML = `<form>
+    <input type="hidden" name="version" value="2">
+    <fieldset><legend>Session store</legend>
+      <label><input type="radio" name="store" value="sqlite" checked> SQLite</label>
+      <label><input type="radio" name="store" value="redis"> Redis</label>
+    </fieldset>
+    <p>Which platforms?</p>
+    <label><input type="checkbox" name="platforms" value="web"> Web</label>
+    <label><input type="checkbox" name="platforms" value="ios"> iOS</label>
+    <label>Lifetime (days) <input type="number" name="ttl" min="1" required></label>
+  </form>`;
+
+  const takeQuestionCard = (
+    takeEvent: (
+      predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>,
+  ) =>
+    Effect.gen(function* () {
+      const event = yield* takeEvent(
+        (candidate) =>
+          candidate.type === "turn_item.updated" &&
+          candidate.turnItem.type === "user_input_request" &&
+          candidate.turnItem.status === "waiting",
+      );
+      if (event.type !== "turn_item.updated" || event.turnItem.type !== "user_input_request") {
+        return assert.fail("expected a question card");
+      }
+      return event.turnItem;
+    });
+
+  it.effect("answers omp's form from one card and asks rejected answers again", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "form-1",
+        method: "form",
+        html: FORM_HTML,
+      });
+      const card = yield* takeQuestionCard(takeEvent);
+      assert.equal(card.title, "Session store");
+      assert.deepEqual(
+        card.questions.map((question) => [question.id, question.multiSelect ?? false]),
+        [
+          ["store", false],
+          ["platforms", true],
+          ["ttl", false],
+        ],
+      );
+      yield* runtime.respondToRuntimeRequest({
+        requestId: card.requestId,
+        answers: { store: "redis", platforms: ["web", "Android"], ttl: "0" },
+      });
+      // ttl breaks min=1, which would fail omp's ask: only it is asked again.
+      const retry = yield* takeQuestionCard(takeEvent);
+      assert.notEqual(retry.requestId, card.requestId);
+      assert.deepEqual(
+        retry.questions.map((question) => question.id),
+        ["ttl"],
+      );
+      assert.match(retry.questions[0]?.question ?? "", /Must be at least 1/);
+      yield* runtime.respondToRuntimeRequest({ requestId: retry.requestId, answers: { ttl: "7" } });
+      const response = yield* fake.takeRequest("extension_ui_response");
+      assert.deepEqual(response, {
+        type: "extension_ui_response",
+        id: "form-1",
+        data: { version: "2", store: "redis", platforms: ["web", "Android"], ttl: 7 },
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("dismisses a form the card cannot ask and says why", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "form-bad",
+        method: "form",
+        html: '<form><input type="radio" name="x" value="a"><input name="x"></form>',
+      });
+      const response = yield* fake.takeRequest("extension_ui_response");
+      assert.deepEqual(response, {
+        type: "extension_ui_response",
+        id: "form-bad",
+        cancelled: true,
+      });
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+      );
+      assert.isTrue(
+        notice.type === "turn_item.updated" &&
+          notice.turnItem.type === "system_notice" &&
+          notice.turnItem.message.includes('several controls share the name "x"'),
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("lets a timed-out form submit its defaults", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeOmp;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "form-timed",
+        method: "form",
+        html: FORM_HTML,
+        timeout: 1_000,
+      });
+      yield* takeQuestionCard(takeEvent);
+      yield* TestClock.adjust("1001 millis");
+      const response = yield* fake.takeRequest("extension_ui_response");
+      assert.deepEqual(response, {
+        type: "extension_ui_response",
+        id: "form-timed",
+        cancelled: true,
+        timedOut: true,
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("emits session-start dialogs before a turn exists", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeOmp;
