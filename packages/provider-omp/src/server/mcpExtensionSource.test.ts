@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Execute the shipped extension at its native JavaScript boundary.
 import { expect, it } from "@effect/vitest";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 import * as NodeVM from "node:vm";
 import {
   OMP_APPROVAL_FEEDBACK_REQUEST_PREFIX,
@@ -236,9 +237,13 @@ it("holds a plan submission for review and lets feedback send the agent back to 
   };
   type Hook = (
     event: { toolName: string; input: unknown },
-    ctx: { ui: Ui },
-  ) => Promise<{ block: true; reason: string } | undefined>;
+    ctx: { ui: Ui; sessionManager: { getArtifactsDir: () => string } },
+  ) => Promise<{ block: true; reason: string } | { input: unknown } | undefined>;
   const hooks = new Map<string, Hook>();
+  const dir = "/sessions/resumed-thread";
+  const files = new Map([
+    [NodePath.join(dir, "local", "asm-git-helper-plan.md"), "## Plan\n1. Install helper"],
+  ]);
   const source = NodeModule.stripTypeScriptTypes(
     OMP_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
       "export default async function",
@@ -247,55 +252,83 @@ it("holds a plan submission for review and lets feedback send the agent back to 
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(omp)`, {
     process: { env: { T3_OMP_PLAN_REVIEW: "1" } },
+    NodePath,
+    NodeFSP: {
+      readFile: async (path: string) => {
+        const body = files.get(path);
+        if (body === undefined) throw new Error("File not found");
+        return body;
+      },
+    },
     omp: { on: (name: string, hook: Hook) => hooks.set(name, hook) },
   });
   const hook = hooks.get("tool_call")!;
   const selectTitles: string[] = [];
-  const ui = (choice: string | undefined, feedback?: string): Ui => ({
-    confirm: async () => {
-      throw new Error("plan-mode writes must not raise a generic approval");
+  const ctx = (choice?: string, feedback?: string) => ({
+    ui: {
+      confirm: async () => {
+        throw new Error("plan-mode writes must not raise a generic approval");
+      },
+      select: async (title: string) => {
+        selectTitles.push(title);
+        return choice;
+      },
+      input: async () => feedback,
     },
-    select: async (title) => {
-      selectTitles.push(title);
-      return choice;
-    },
-    input: async () => feedback,
+    sessionManager: { getArtifactsDir: () => dir },
   });
-  const submit = { toolName: "write", input: { path: "xd://propose", content: "add-subtract" } };
+  // omp 19 submits with `propose <slug>`, run from bash or as the propose tool; on resume the
+  // extension never saw the plan file being written, so it reads the file the slug names.
+  const propose = (title: string) => ({ toolName: "propose", input: { title } });
+  const bash = (command: string) => ({ toolName: "bash", input: { command } });
+  const slug = "asm-git-helper";
 
-  // Drafting the plan file is part of planning, not a change to approve.
+  // Drafting the plan file is part of planning, not a change to review.
   expect(
     await hook(
-      {
-        toolName: "write",
-        input: { path: "local://add-subtract-plan.md", content: "# Plan\n1. Add subtract()" },
-      },
-      { ui: ui(undefined) },
+      { toolName: "write", input: { path: "local://asm-git-helper-plan.md", content: "# Plan" } },
+      ctx(),
     ),
   ).toBeUndefined();
 
-  const refined = await hook(submit, { ui: ui(OMP_PLAN_REFINE_OPTION, "Name it minus()") });
-  expect(refined?.block).toBe(true);
-  expect(refined?.reason).toContain("Name it minus()");
-  // The submission carried only the slug, so the review shows the drafted plan.
-  expect(selectTitles.at(-1)).toContain("1. Add subtract()");
+  const refined = await hook(
+    bash(`propose ${slug}`),
+    ctx(OMP_PLAN_REFINE_OPTION, "Name it minus()"),
+  );
+  expect(refined).toMatchObject({ block: true });
+  expect(refined && "reason" in refined ? refined.reason : "").toContain("Name it minus()");
   // The adapter recovers the plan from this title to show it as T3's plan card.
-  expect(ompPlanReviewMarkdown(selectTitles.at(-1) ?? "")).toBe("# Plan\n1. Add subtract()");
+  expect(ompPlanReviewMarkdown(selectTitles.at(-1) ?? "")).toBe("## Plan\n1. Install helper");
   expect(ompPlanReviewMarkdown("Allow write?")).toBeUndefined();
 
-  expect(await hook(submit, { ui: ui(OMP_PLAN_APPROVE_OPTION) })).toBeUndefined();
-  // omp names the plan file after the submission, so a summary instead of the slug would make
-  // the approved write fail; the approval hands omp the slug of the plan file the agent edited.
-  await hook(
-    { toolName: "edit", input: { input: "[local://add-minus-plan.md#AB12]\nPUT 1.=1:\n+# Plan" } },
-    { ui: ui(undefined) },
+  // Review the current file after edits, and hand omp the bare slug it looks the file up by.
+  files.set(NodePath.join(dir, "local", `${slug}-plan.md`), "## Revised\n1. Verify helper");
+  expect(await hook(propose(`${slug}\n\nOriginal summary.`), ctx(OMP_PLAN_APPROVE_OPTION))).toEqual(
+    {
+      input: { title: slug },
+    },
   );
-  const summary = { path: "xd://propose", content: "add-minus\n\nAdd minus() to util.py." };
-  expect(
-    await hook({ toolName: "write", input: summary }, { ui: ui(OMP_PLAN_APPROVE_OPTION) }),
-  ).toEqual({ input: { ...summary, content: "add-minus" } });
+  expect(ompPlanReviewMarkdown(selectTitles.at(-1) ?? "")).toBe("## Revised\n1. Verify helper");
+  expect(await hook(propose(slug), ctx(OMP_PLAN_APPROVE_OPTION))).toBeUndefined();
+  expect(await hook(bash(`propose ${slug}`), ctx(OMP_PLAN_APPROVE_OPTION))).toBeUndefined();
+  expect(await hook(bash(`propose "${slug}" && echo done`), ctx(OMP_PLAN_APPROVE_OPTION))).toEqual({
+    input: { command: `propose ${slug}` },
+  });
+  // Other shell commands, including ones that merely start with the word, are not submissions.
+  expect(await hook(bash("proposer --help"), ctx(OMP_PLAN_APPROVE_OPTION))).toBeUndefined();
+  expect(await hook(bash("ls local://"), ctx(OMP_PLAN_APPROVE_OPTION))).toBeUndefined();
+  // Older omp writes the slug to xd://propose; it is reviewed the same way.
+  const legacy = { toolName: "write", input: { path: "xd://propose", content: slug } };
+  expect(await hook(legacy, ctx(OMP_PLAN_APPROVE_OPTION))).toBeUndefined();
 
-  const dismissed = await hook(submit, { ui: ui(undefined) });
-  expect(dismissed?.block).toBe(true);
-  expect(dismissed?.reason).not.toContain("feedback");
+  // A slug without a plan file is sent back without asking the user.
+  const reviewed = selectTitles.length;
+  expect(await hook(propose("missing"), ctx(OMP_PLAN_APPROVE_OPTION))).toMatchObject({
+    block: true,
+  });
+  expect(selectTitles).toHaveLength(reviewed);
+
+  const dismissed = await hook(propose(slug), ctx());
+  expect(dismissed).toMatchObject({ block: true });
+  expect(dismissed && "reason" in dismissed ? dismissed.reason : "").not.toContain("feedback");
 });

@@ -105,7 +105,7 @@ the base tag at the top of this file. Then push with
 - `knip:check`;
 - the repo-wide typecheck (cached), which covers provider-omp, the server and the clients;
 - provider-omp unit tests;
-- the 14 omp replay fixtures (`OmpReplayFixtures.integration.test.ts`).
+- the 13 omp replay fixtures (`OmpReplayFixtures.integration.test.ts`).
 
 The pre-commit hook runs `vp staged` (fmt, lint, knip) on each commit.
 

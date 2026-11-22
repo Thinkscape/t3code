@@ -1891,7 +1891,7 @@ describe("OmpAdapterV2 planning", () => {
         );
         yield* runtime.respondToRuntimeRequest({
           requestId: pending.runtimeRequest.id,
-          answers: { [nativeId]: choice },
+          answers: { "plan-review": choice },
         });
         const response = yield* fake.takeRequest("extension_ui_response");
         assert.equal(response["id"], nativeId);

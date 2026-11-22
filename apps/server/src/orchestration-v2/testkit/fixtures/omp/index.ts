@@ -13,8 +13,6 @@ import {
 } from "./approvals/output.ts";
 import { ompAskFormInput } from "./ask_form/input.ts";
 import { assertOmpAskFormOutput } from "./ask_form/output.ts";
-import { ompAskQuestionInput } from "./ask_question/input.ts";
-import { assertOmpAskQuestionOutput } from "./ask_question/output.ts";
 import { ompBackgroundJobWakeInput } from "./background_job_wake/input.ts";
 import { assertOmpBackgroundJobWakeOutput } from "./background_job_wake/output.ts";
 import { ompBashToolInput } from "./bash_tool/input.ts";
@@ -90,9 +88,6 @@ export const OMP_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixture> = [
     "./approvals/declined_transcript.ndjson",
     { assertOutput: assertOmpApprovalDeclinedOutput },
   ),
-  ompFixture("omp_ask_question", ompAskQuestionInput, "./ask_question/transcript.ndjson", {
-    assertOutput: assertOmpAskQuestionOutput,
-  }),
   ompFixture("omp_ask_form", ompAskFormInput, "./ask_form/transcript.ndjson", {
     assertOutput: assertOmpAskFormOutput,
   }),

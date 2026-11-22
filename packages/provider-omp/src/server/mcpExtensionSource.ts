@@ -254,54 +254,58 @@ export default async function t3McpExtension(omp: ExtensionAPI) {
     }
     if (blocks.length > 0) return { action: "transform", text: event.text + "\\n\\n" + blocks.join("\\n\\n"), images: event.images };
   });
-  // Under --plan-yolo omp approves a plan the moment the agent submits it to xd://propose. This
-  // hook runs before that write, so holding it until T3 answers is the review step, and blocking
-  // it keeps the agent planning. The submission often carries only the plan's slug; the text is
-  // in the plan file the agent wrote (and maybe edited) just before.
-  let planDraft = "";
-  let planSlug = "";
-  const notePlanFile = (input: unknown) => {
-    const match = /local:\\/\\/([A-Za-z0-9_-]+)-plan\\.md/.exec(JSON.stringify(input ?? null));
-    if (match) planSlug = match[1];
-  };
-  const readPlanFile = async (ctx: { localProtocolOptions?: { getArtifactsDir?: () => string | null } }) => {
-    const dir = planSlug ? ctx.localProtocolOptions?.getArtifactsDir?.() : undefined;
-    if (!dir) return undefined;
-    return NodeFSP.readFile(NodePath.join(dir, "local", planSlug + "-plan.md"), "utf8").catch(() => undefined);
-  };
+  // Under --plan-yolo omp approves a plan the moment the agent submits it: omp 19 runs the
+  // "propose <slug>" command (a bash call, or the propose tool where bash cannot run it) and
+  // older omp writes the slug to xd://propose. This hook runs before the call, so holding it
+  // until T3 answers is the review and blocking it keeps the agent planning. omp dispatches a
+  // command inside bash without a hook of its own, so the bash call is the one held. The plan
+  // under review is the current local://<slug>-plan.md, which may predate this process.
   omp.on("tool_call", async (event, ctx) => {
-    if (env(PLAN_REVIEW_ENV) === "1" && (event.toolName === "write" || event.toolName === "edit")) {
-      const input = (event.input ?? {}) as { path?: unknown; content?: unknown };
-      const path = typeof input.path === "string" ? input.path : "";
-      const content = typeof input.content === "string" ? input.content : "";
-      if (event.toolName === "write" && path.startsWith("xd://propose")) {
-        const plan = (content.includes("\\n") ? content : (await readPlanFile(ctx)) || planDraft || content).trim();
-        const choice = await ctx.ui.select(
-          PLAN_REVIEW_PROMPT + "\\n\\n" + plan, [PLAN_APPROVE, PLAN_REFINE], { signal: ctx.signal },
-        );
-        if (choice === PLAN_APPROVE) {
-          // omp turns the submission into the plan file name; anything but the bare slug fails
-          // that lookup, so hand it the slug of the plan file instead.
-          return /^[A-Za-z0-9_-]+$/.test(content.trim()) || !planSlug
-            ? undefined
-            : { input: { ...input, content: planSlug } };
-        }
-        const feedback = choice === PLAN_REFINE
-          ? await ctx.ui.input(PLAN_FEEDBACK_PROMPT, undefined, { signal: ctx.signal })
+    if (env(PLAN_REVIEW_ENV) !== "1") return;
+    const input = (event.input ?? {}) as { path?: unknown; content?: unknown; title?: unknown; command?: unknown };
+    const command = event.toolName === "bash" && typeof input.command === "string"
+      ? /^\\s*propose(?:\\s+([\\s\\S]*))?$/.exec(input.command)
+      : null;
+    const field = command
+      ? "command"
+      : event.toolName === "propose"
+        ? "title"
+        : event.toolName === "write" && typeof input.path === "string" && input.path.startsWith("xd://propose")
+          ? "content"
           : undefined;
-        return {
-          block: true,
-          reason: "The user did not approve this plan."
-            + (feedback ? " Their feedback: " + feedback : "")
-            + " Stay in plan mode, revise the plan file, and submit it again.",
-        };
-      }
-      if (event.toolName === "edit" || path.startsWith("local://")) {
-        notePlanFile(event.input);
-        if (event.toolName === "write") planDraft = content;
-        return;
-      }
+    if (!field) return;
+    const submitted = command ? (command[1] ?? "") : input[field];
+    // Models sometimes append a summary after the slug or quote it; omp finds the plan by the slug.
+    const slug = (typeof submitted === "string" ? submitted.trim() : "").split(/\\s/, 1)[0].replace(/^["']|["']$/g, "");
+    if (!/^[A-Za-z0-9_-]+$/.test(slug)) {
+      return { block: true, reason: "Submit the slug of local://<slug>-plan.md to propose." };
     }
+    const dir = ctx.localProtocolOptions?.getArtifactsDir?.() ?? ctx.sessionManager?.getArtifactsDir?.();
+    const plan = dir
+      ? await NodeFSP.readFile(NodePath.join(dir, "local", slug + "-plan.md"), "utf8").catch(() => undefined)
+      : undefined;
+    if (!plan?.trim()) {
+      return {
+        block: true,
+        reason: "Cannot review local://" + slug + "-plan.md. Write the plan there and submit its slug again.",
+      };
+    }
+    const choice = await ctx.ui.select(
+      PLAN_REVIEW_PROMPT + "\\n\\n" + plan.trim(), [PLAN_APPROVE, PLAN_REFINE], { signal: ctx.signal },
+    );
+    if (choice === PLAN_APPROVE) {
+      const approved = command ? "propose " + slug : slug;
+      return input[field] === approved ? undefined : { input: { ...input, [field]: approved } };
+    }
+    const feedback = choice === PLAN_REFINE
+      ? await ctx.ui.input(PLAN_FEEDBACK_PROMPT, undefined, { signal: ctx.signal })
+      : undefined;
+    return {
+      block: true,
+      reason: "The user did not approve this plan."
+        + (feedback ? " Their feedback: " + feedback : "")
+        + " Stay in plan mode, revise the plan file, and submit it again.",
+    };
   });
   // Which calls ask is omp's own decision: T3 launches it with the --approval-mode of the
   // thread's runtime mode. A denial reaches the agent only as "Tool call denied by user", so

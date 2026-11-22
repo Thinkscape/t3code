@@ -140,6 +140,8 @@ const DEFAULT_OMP_SETTINGS = Schema.decodeSync(OmpSettings)({});
 
 // Inherit Omp's configured defaultProvider/defaultModel without calling set_model.
 const OMP_INHERIT_MODEL_SLUG = "default";
+/** The question id of the plan review card's approve/refine decision. */
+const OMP_PLAN_REVIEW_QUESTION_ID = "plan-review";
 
 const STREAM_FLUSH_MS = 50;
 const OMP_REQUEST_TIMEOUT_MS = 15_000;
@@ -2804,6 +2806,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             : yield* showProposedPlan(turn, nativeRequestId, planMarkdown);
         // The plan card carries the plan text; the question card only asks for the decision.
         const title = proposedPlan === undefined ? rawTitle : OMP_PLAN_REVIEW_PROMPT;
+        // omp 19's dialog ids are random; a fixed id lets a scripted answer find the decision.
+        const questionId =
+          proposedPlan === undefined ? nativeRequestId : OMP_PLAN_REVIEW_QUESTION_ID;
         const threadId =
           turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId;
         const providerThreadId = state?.providerThread.id ?? null;
@@ -2894,9 +2899,9 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
                           ? []
                           : [
                               askChoice === undefined
-                                ? ompQuestion(nativeRequestId, method, title, event)
+                                ? ompQuestion(questionId, method, title, event)
                                 : ompAskChoiceQuestion(
-                                    ompQuestion(nativeRequestId, method, title, event),
+                                    ompQuestion(questionId, method, title, event),
                                     askChoice,
                                   ),
                             ],
@@ -2904,7 +2909,7 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
         const pending: PendingOmpPrompt = {
           nativeRequestId,
           method,
-          questionId: nativeRequestId,
+          questionId,
           questions: method === "ask" ? ompAskQuestions(event) : [],
           approvalKey,
           expiresAt,
