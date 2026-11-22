@@ -6,9 +6,9 @@ over omp's RPC protocol. User-facing behavior: [docs/user/providers-omp.md](docs
 
 - Branch: `omp-native` on `git@github.com:Thinkscape/t3code.git`. Push only this branch, never
   tags, and force-push only with `--force-with-lease`.
-- Base: upstream nightly tag `v0.1.10-nightly.20261116.4761`. The branch is always a short stack of
-  commits on one upstream nightly tag; `git describe --tags --abbrev=0 --match 'v*-nightly.*'`
-  prints it.
+- Base: one upstream nightly tag; `git describe --tags --abbrev=0 --match 'v*-nightly.*'` prints
+  it. The lab's auto-deploy (home-fpp `scripts/t3code/auto-deploy.sh`) rebases this branch onto
+  newer nightlies and pushes it, so this file does not record the tag.
 
 ## Client constraints
 
@@ -37,6 +37,11 @@ On top of the base tag, oldest first. Core edits sit in their own commits.
 6. `fix(omp): port upstream Pi provider fixes` (fixes upstream made to `provider-pi` that apply
    to omp; fold later ports into it)
 7. `chore(fork): document the fork and add omp:gates`
+8. `docs(fork): …`, `fix(omp): answer omp 19's ask form from T3's question card`,
+   `fix(omp): hold omp 19's plan proposal for T3's plan review`: fixes for omp 19 (fold them into
+   3 when squashing).
+9. `chore: regenerate pnpm-lock.yaml on <tag>`: written by the auto-deploy's replay when
+   upstream's lockfile needs re-resolving.
 
 ## Files
 
@@ -55,20 +60,20 @@ Fork-owned (upstream never touches them):
 
 Upstream-owned files the fork edits, and why:
 
-| File                                                             | Commit | Why                                                                                                                                             |
-| ---------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/provider-core/src/server/ProviderAdapter.ts`           | 1      | Adds the `model_option.ended` adapter event. omp leaves Plan mode on its own when a plan is approved, and T3 has no other way to hear about it. |
-| `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`      | 1      | Turns that event into the existing `thread.model-selection-updated` domain event under the thread lock, so no new wire field is needed.         |
-| `apps/server/src/orchestration-v2/RunExecutionService.ts`        | 1      | Routes the event to the run that owns it.                                                                                                       |
-| `packages/contracts/src/usage.ts`                                | 2      | Adds `omp` to `UsageProviderKind`; omp usage and limits are reported under it.                                                                  |
-| `apps/web/src/components/usage/usageProviders.ts`                | 2      | Label and color for `omp`. The map is exhaustive over `UsageProviderKind`, so it fails to compile without it.                                   |
-| `apps/mobile/src/features/usage/usageProviders.ts`               | 2      | Same as web.                                                                                                                                    |
-| `apps/server/src/provider/builtInDrivers.ts`                     | 4      | Registers `OmpDriver` as a built-in and usage driver.                                                                                           |
-| `apps/server/package.json`                                       | 4, 5   | `@t3tools/provider-omp` dependency; `record:omp-replay` script, which is also the recorder's knip entry point.                                  |
-| `packages/client-runtime/package.json`, `src/providerClients.ts` | 4      | Registers `ompClient` so clients built from this tree show omp settings and icons.                                                              |
-| `packages/contracts/src/settings.ts`                             | 4      | Adds `omp` to `DEFAULT_DISABLED_PROVIDER_DRIVERS`, matching the driver's decoding default.                                                      |
-| `package.json`                                                   | 7      | The `omp:gates` script.                                                                                                                         |
-| `pnpm-lock.yaml`                                                 | 3, 4   | Importer entries for the new workspace package and its dependents. Always regenerated, never merged by hand.                                    |
+| File                                                                    | Commit | Why                                                                                                                                             |
+| ----------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/provider-core/src/server/ProviderAdapter.ts`                  | 1      | Adds the `model_option.ended` adapter event. omp leaves Plan mode on its own when a plan is approved, and T3 has no other way to hear about it. |
+| `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`             | 1      | Turns that event into the existing `thread.model-selection-updated` domain event under the thread lock, so no new wire field is needed.         |
+| `apps/server/src/orchestration-v2/RunExecutionService.ts`               | 1      | Routes the event to the run that owns it.                                                                                                       |
+| `packages/contracts/src/usage.ts`                                       | 2      | Adds `omp` to `UsageProviderKind`; omp usage and limits are reported under it.                                                                  |
+| `apps/web/src/components/usage/usageProviders.ts`                       | 2      | Label and color for `omp`. The map is exhaustive over `UsageProviderKind`, so it fails to compile without it.                                   |
+| `apps/mobile/src/features/usage/usageProviders.ts`, `providerColors.ts` | 2      | Label (first) and color (second; upstream moved the colors there in 0.1.11) for `omp`, same reason as web.                                      |
+| `apps/server/src/provider/builtInDrivers.ts`                            | 4      | Registers `OmpDriver` as a built-in and usage driver.                                                                                           |
+| `apps/server/package.json`                                              | 4, 5   | `@t3tools/provider-omp` dependency; `record:omp-replay` script, which is also the recorder's knip entry point.                                  |
+| `packages/client-runtime/package.json`, `src/providerClients.ts`        | 4      | Registers `ompClient` so clients built from this tree show omp settings and icons.                                                              |
+| `packages/contracts/src/settings.ts`                                    | 4      | Adds `omp` to `DEFAULT_DISABLED_PROVIDER_DRIVERS`, matching the driver's decoding default.                                                      |
+| `package.json`                                                          | 7      | The `omp:gates` script.                                                                                                                         |
+| `pnpm-lock.yaml`                                                        | 3, 4   | Importer entries for the new workspace package and its dependents. Always regenerated, never merged by hand.                                    |
 
 ## Catching up with upstream
 
@@ -92,9 +97,8 @@ On a conflict:
   change and re-apply the fork's intent from the commit message.
 
 After the rebase, run `CI= vp install`, then `vp run omp:gates`. Fix anything red in the commit
-that owns the file (`git commit --fixup <sha>` then `git rebase -i --autosquash "$new"`). Update
-the base tag at the top of this file. Then push with
-`git push --force-with-lease origin omp-native`.
+that owns the file (`git commit --fixup <sha>` then `git rebase -i --autosquash "$new"`). Then
+push with `git push --force-with-lease origin omp-native`.
 
 ## Gates
 
@@ -126,3 +130,43 @@ writes the transcript only after the recording replays. `--verify` replays the e
 and does not need omp. `--scenario status_discovery` records
 `packages/provider-omp/test/fixtures/status-discovery.ndjson`. After recording, update the
 fixture's `output.ts` assertions if needed and run `omp:gates`.
+
+## How omp reaches T3
+
+The provider runs `omp --mode rpc-ui` per thread (`lifecycle.ts`, `rpc.ts`: JSONL over stdio,
+`negotiate_protocol` v2 with `rpc_chunk` reassembly; v1 caps a frame at 1 MiB and omp's model
+catalog is larger). omp's RPC contract is `docs/rpc.md` in the omp repository at the release tag
+the hosts run (`omp --version`); `packages/coding-agent/src/modes/rpc/rpc-types.ts` is the frame
+list. What maps where, so a broken feature points at one place:
+
+| omp frame / mechanism                                                                                                                                                                            | T3 result                                                                                                                                     | Code                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `message_*`, `agent_*`, `prompt_result`, `session_settled`                                                                                                                                       | assistant text, reasoning, run start/end                                                                                                      | `adapter.ts`                                                  |
+| `tool_execution_start/update/end`                                                                                                                                                                | tool rows (`command_execution`, `file_change`, `dynamic_tool`); a direct `write` to `xd://<t3 tool>` becomes that tool's row                  | `adapter.ts` (`ompDeviceToolCall`)                            |
+| T3 tools called inside `eval` or a subagent (no RPC frames of their own)                                                                                                                         | reported by the injected extension through `setWidget("t3-code:tool-result")`, projected as rows                                              | `mcpExtensionSource.ts`, `adapter.ts` (`ompReportedToolCall`) |
+| `extension_ui_request` `confirm` / `select` from `--approval-mode`                                                                                                                               | approval cards                                                                                                                                | `approvals.ts`, `adapter.ts`                                  |
+| `extension_ui_request` `form` (omp 19's `ask`: one HTML `<form>`)                                                                                                                                | one T3 question card; answers validated, returned as `data`; anything unmappable is cancelled at once (an unanswered form blocks omp forever) | `form.ts`, `questions.ts`                                     |
+| `extension_ui_request` `select`/`input`/`editor` (older omp `ask`, extension dialogs)                                                                                                            | question cards                                                                                                                                | `questions.ts`                                                |
+| Plan mode: omp runs with `--plan-yolo`; the injected extension holds the plan submission (`propose <slug>` in bash, the `propose` tool, or older omp's `xd://propose` write) and asks for review | plan card plus Approve/Refine; approval emits `model_option.ended`                                                                            | `mcpExtensionSource.ts`, `plans.ts`                           |
+| `subagent_*` events, `task`                                                                                                                                                                      | subagent rows and child threads                                                                                                               | `adapter.ts`                                                  |
+| `todo` tool results                                                                                                                                                                              | todo list                                                                                                                                     | `adapter.ts`                                                  |
+| `omp usage --json`                                                                                                                                                                               | limit bars                                                                                                                                    | `usageLimits.ts`                                              |
+
+## When a new omp breaks something
+
+A new omp release can change the RPC surface without a version bump on our side (omp 19 moved
+`ask` to `form` and plan approval to the `propose` command; both failed silently: no card, or a
+plan that approved itself). To find and fix such a break:
+
+1. Read the omp repository's `CHANGELOG.md` and `docs/rpc.md` between the old and new tag, and
+   `git log <old>..<new> -- packages/coding-agent/src/modes/rpc`.
+2. Replay every scenario live against the new binary, one per run
+   (`T3_OMP_BIN=<omp> node scripts/record-omp-rpc-replay-fixture.ts --scenario <name>` with a
+   scratch output, or `--verify` to compare). A scenario that changes shape points at the row in
+   the table above.
+3. Fix in a separate worktree (`git worktree add <dir> -b fix/<name> omp-native`), never in a
+   checkout someone else may be editing; add unit tests and re-record the affected fixtures; run
+   `omp:gates`; live-check on a scratch server from source
+   (`node apps/server/src/bin.ts serve --base-dir <dir> --port <p> --host 127.0.0.1 --no-browser`
+   with `providerInstances.omp` set to the new binary).
+4. Fast-forward `omp-native` to the fix and let the lab's auto-deploy ship it.
