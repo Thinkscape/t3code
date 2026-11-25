@@ -4713,12 +4713,11 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
               if (approved) {
                 const { turnInput } = pending.proposedPlan.turn;
                 yield* emit({
-                  type: "model_option.ended",
+                  type: "thread_model_selection.updated",
                   driver: OMP_PROVIDER,
                   threadId: turnInput.threadId,
-                  runId: turnInput.runId,
-                  optionId: OMP_MODE_OPTION_ID,
-                  value: OMP_PLAN_MODE,
+                  instanceId: options.instanceId,
+                  changes: [{ id: OMP_MODE_OPTION_ID, from: OMP_PLAN_MODE, to: "default" }],
                 });
               }
             }
@@ -4814,7 +4813,6 @@ export const makeOmpAdapterV2 = Effect.fn("makeOmpAdapterV2")(function* (
             );
             return {
               providerThread: state.providerThread,
-              providerTurns: [],
               messages,
               runtimeRequests: [],
             };
@@ -5264,7 +5262,7 @@ function ompExtensionDisplayName(extensionPath: string | undefined): string {
 function ompThreadSnapshot(
   providerThread: OrchestrationV2ProviderThread,
 ): ProviderAdapter.ProviderAdapterV2ThreadSnapshot {
-  return { providerThread, providerTurns: [], messages: [], runtimeRequests: [] };
+  return { providerThread, messages: [], runtimeRequests: [] };
 }
 
 function ompQuestion(

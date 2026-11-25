@@ -27,9 +27,9 @@ entries they cannot decode.
 
 ## Commits
 
-On top of the base tag, oldest first. Core edits sit in their own commits.
+Patch groups below retain their reference numbers. The former core patch (1) is gone:
+omp now uses upstream's instance-scoped `thread_model_selection.updated` event (#40818).
 
-1. `feat(core): let a provider end a model option it left on its own`
 2. `feat(contracts): add omp as a usage provider kind`
 3. `feat(omp): add the native omp RPC provider package`
 4. `feat(omp): register the omp driver on the server and in clients`
@@ -60,20 +60,17 @@ Fork-owned (upstream never touches them):
 
 Upstream-owned files the fork edits, and why:
 
-| File                                                                    | Commit | Why                                                                                                                                             |
-| ----------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/provider-core/src/server/ProviderAdapter.ts`                  | 1      | Adds the `model_option.ended` adapter event. omp leaves Plan mode on its own when a plan is approved, and T3 has no other way to hear about it. |
-| `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`             | 1      | Turns that event into the existing `thread.model-selection-updated` domain event under the thread lock, so no new wire field is needed.         |
-| `apps/server/src/orchestration-v2/RunExecutionService.ts`               | 1      | Routes the event to the run that owns it.                                                                                                       |
-| `packages/contracts/src/usage.ts`                                       | 2      | Adds `omp` to `UsageProviderKind`; omp usage and limits are reported under it.                                                                  |
-| `apps/web/src/components/usage/usageProviders.ts`                       | 2      | Label and color for `omp`. The map is exhaustive over `UsageProviderKind`, so it fails to compile without it.                                   |
-| `apps/mobile/src/features/usage/usageProviders.ts`, `providerColors.ts` | 2      | Label (first) and color (second; upstream moved the colors there in 0.1.11) for `omp`, same reason as web.                                      |
-| `apps/server/src/provider/builtInDrivers.ts`                            | 4      | Registers `OmpDriver` as a built-in and usage driver.                                                                                           |
-| `apps/server/package.json`                                              | 4, 5   | `@t3tools/provider-omp` dependency; `record:omp-replay` script, which is also the recorder's knip entry point.                                  |
-| `packages/client-runtime/package.json`, `src/providerClients.ts`        | 4      | Registers `ompClient` so clients built from this tree show omp settings and icons.                                                              |
-| `packages/contracts/src/settings.ts`                                    | 4      | Adds `omp` to `DEFAULT_DISABLED_PROVIDER_DRIVERS`, matching the driver's decoding default.                                                      |
-| `package.json`                                                          | 7      | The `omp:gates` script.                                                                                                                         |
-| `pnpm-lock.yaml`                                                        | 3, 4   | Importer entries for the new workspace package and its dependents. Always regenerated, never merged by hand.                                    |
+| File                                                                    | Commit | Why                                                                                                            |
+| ----------------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/src/usage.ts`                                       | 2      | Adds `omp` to `UsageProviderKind`; omp usage and limits are reported under it.                                 |
+| `apps/web/src/components/usage/usageProviders.ts`                       | 2      | Label and color for `omp`. The map is exhaustive over `UsageProviderKind`, so it fails to compile without it.  |
+| `apps/mobile/src/features/usage/usageProviders.ts`, `providerColors.ts` | 2      | Label (first) and color (second; upstream moved the colors there in 0.1.11) for `omp`, same reason as web.     |
+| `apps/server/src/provider/builtInDrivers.ts`                            | 4      | Registers `OmpDriver` as a built-in and usage driver.                                                          |
+| `apps/server/package.json`                                              | 4, 5   | `@t3tools/provider-omp` dependency; `record:omp-replay` script, which is also the recorder's knip entry point. |
+| `packages/client-runtime/package.json`, `src/providerClients.ts`        | 4      | Registers `ompClient` so clients built from this tree show omp settings and icons.                             |
+| `packages/contracts/src/settings.ts`                                    | 4      | Adds `omp` to `DEFAULT_DISABLED_PROVIDER_DRIVERS`, matching the driver's decoding default.                     |
+| `package.json`                                                          | 7      | The `omp:gates` script.                                                                                        |
+| `pnpm-lock.yaml`                                                        | 3, 4   | Importer entries for the new workspace package and its dependents. Always regenerated, never merged by hand.   |
 
 ## Catching up with upstream
 
@@ -147,7 +144,7 @@ list. What maps where, so a broken feature points at one place:
 | `extension_ui_request` `confirm` / `select` from `--approval-mode`                                                                                                                               | approval cards                                                                                                                                | `approvals.ts`, `adapter.ts`                                  |
 | `extension_ui_request` `form` (omp 19's `ask`: one HTML `<form>`)                                                                                                                                | one T3 question card; answers validated, returned as `data`; anything unmappable is cancelled at once (an unanswered form blocks omp forever) | `form.ts`, `questions.ts`                                     |
 | `extension_ui_request` `select`/`input`/`editor` (older omp `ask`, extension dialogs)                                                                                                            | question cards                                                                                                                                | `questions.ts`                                                |
-| Plan mode: omp runs with `--plan-yolo`; the injected extension holds the plan submission (`propose <slug>` in bash, the `propose` tool, or older omp's `xd://propose` write) and asks for review | plan card plus Approve/Refine; approval emits `model_option.ended`                                                                            | `mcpExtensionSource.ts`, `plans.ts`                           |
+| Plan mode: omp runs with `--plan-yolo`; the injected extension holds the plan submission (`propose <slug>` in bash, the `propose` tool, or older omp's `xd://propose` write) and asks for review | plan card plus Approve/Refine; approval changes Mode from Plan to Default via `thread_model_selection.updated`                                | `mcpExtensionSource.ts`, `plans.ts`, `adapter.ts`             |
 | `subagent_*` events, `task`                                                                                                                                                                      | subagent rows and child threads                                                                                                               | `adapter.ts`                                                  |
 | `todo` tool results                                                                                                                                                                              | todo list                                                                                                                                     | `adapter.ts`                                                  |
 | `omp usage --json`                                                                                                                                                                               | limit bars                                                                                                                                    | `usageLimits.ts`                                              |

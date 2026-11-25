@@ -1906,7 +1906,7 @@ describe("OmpAdapterV2 planning", () => {
         let ended: ProviderAdapter.ProviderAdapterV2Event | undefined;
         while (true) {
           const event = yield* Queue.take(emitted);
-          if (event.type === "model_option.ended") ended = event;
+          if (event.type === "thread_model_selection.updated") ended = event;
           if (
             event.type === "runtime_request.updated" &&
             event.runtimeRequest.status === "resolved"
@@ -1923,7 +1923,7 @@ describe("OmpAdapterV2 planning", () => {
           refined.settled.plan.status === "superseded",
       );
       // Refining keeps omp planning, so the thread stays in Plan.
-      assert.notEqual(refined.ended?.type, "model_option.ended");
+      assert.isUndefined(refined.ended);
       const approved = yield* review("review-2", OMP_PLAN_APPROVE_OPTION);
       assert.notEqual(approved.card.planId, refined.card.planId);
       assert.isTrue(
@@ -1933,10 +1933,10 @@ describe("OmpAdapterV2 planning", () => {
       );
       // omp has left plan mode for good, so the thread's Mode goes back to its default.
       assert.deepInclude(approved.ended, {
-        type: "model_option.ended",
+        type: "thread_model_selection.updated",
         threadId: THREAD_ID,
-        optionId: "mode",
-        value: "plan",
+        instanceId: OMP_INSTANCE_ID,
+        changes: [{ id: "mode", from: "plan", to: "default" }],
       });
 
       // The same process implements the next message directly.

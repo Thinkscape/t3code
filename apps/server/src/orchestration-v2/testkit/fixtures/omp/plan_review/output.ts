@@ -38,7 +38,10 @@ export function assertOmpPlanReviewOutput(
   const plan = projection.turnItems.find((item) => item.type === "proposed_plan");
   assert.include(plan?.type === "proposed_plan" ? plan.markdown : "", "hello.txt");
   // Approving ended omp's plan mode, so the thread's Mode is back to its default.
-  assert.deepEqual(projection.thread.modelSelection, OMP_MODEL_SELECTION);
+  assert.deepEqual(projection.thread.modelSelection, {
+    ...OMP_MODEL_SELECTION,
+    options: [{ id: "mode", value: "default" }],
+  });
   const review = ompInboundFrames(transcript, "extension_ui_request").find(
     (frame) => field(frame, "method") === "select",
   );
